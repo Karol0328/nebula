@@ -1,0 +1,5 @@
+{
+  "name": "Nebula Terminal",
+  "description": "A professional cryptocurrency dashboard featuring real-time Binance spot market data, CoinGecko integration, Futures Open Interest analysis, and ETF flow tracking.",
+  "requestFramePermissions": []
+}
