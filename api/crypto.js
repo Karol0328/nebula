@@ -49,10 +49,11 @@ export default async function handler(req, res) {
       if (coinIndex !== -1) {
         const asset = assetCtxs[coinIndex];
         return res.status(200).json({
-          source: 'Hyperliquid', // <--- 這裡加了標籤
+          source: 'Hyperliquid',
           funding: { lastFundingRate: asset.funding, markPrice: asset.markPx },
           oi: { openInterest: asset.openInterest },
-          ls: [{ longShortRatio: "1.00" }]
+          // Hyperliquid 的 dayNtlVlm 是單日名目成交量 (USD)
+          volume: { volume24h: asset.dayNtlVlm } 
         });
       }
     }
@@ -68,19 +69,20 @@ export default async function handler(req, res) {
 
     if (okxTicker && okxTicker.data && okxTicker.data[0]) {
         return res.status(200).json({
-          source: 'OKX', // <--- 這裡加了標籤
+          source: 'OKX',
           funding: { lastFundingRate: okxFunding?.data?.[0]?.fundingRate || "0", markPrice: okxTicker.data[0].last },
           oi: { openInterest: okxOI?.data?.[0]?.oi || "0" },
-          ls: [{ longShortRatio: "1.00" }]
+          // OKX 的 volCcy24h 是 24h 成交額 (USD)
+          volume: { volume24h: okxTicker.data[0].volCcy24h }
         });
     }
 
     // 方案 C: 保底
     return res.status(200).json({
-        source: 'MockData', // <--- 這裡加了標籤
+        source: 'MockData',
         funding: { lastFundingRate: "0.0001", markPrice: "0" },
         oi: { openInterest: "0" },
-        ls: [{ longShortRatio: "1.00" }]
+        volume: { volume24h: "0" }
     });
 
   } catch (error) {
