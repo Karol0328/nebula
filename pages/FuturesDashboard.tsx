@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
-import { AlertCircle, TrendingUp, DollarSign, Scale, RefreshCw } from 'lucide-react';
+import { AlertCircle, TrendingUp, DollarSign, Scale, RefreshCw, Server } from 'lucide-react';
 
-// 定義資料介面 (直接寫在這裡確保完整性)
 interface FuturesOIData {
   symbol: string;
   openInterestUsd: number;
@@ -22,46 +21,38 @@ export const FuturesDashboard: React.FC = () => {
   const fetchData = async () => {
     setLoading(true);
     try {
-      // 使用 allorigins 作為 CORS Proxy
-      const proxyBase = 'https://api.allorigins.win/get?url=';
-
       const requests = targetSymbols.map(async (symbol) => {
-        // 1. 取得資金費率與標記價格 (Binance Premium Index)
-        const fundingUrl = encodeURIComponent(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`);
-        const fundingRes = await fetch(`${proxyBase}${fundingUrl}`);
-        const fundingJson = await fundingRes.json();
-        const fundingData = JSON.parse(fundingJson.contents);
+        // 改為呼叫我們自己的 Vercel API
+        const response = await fetch(`/api/crypto?symbol=${symbol}`);
+        
+        if (!response.ok) {
+            console.warn(`Failed to fetch ${symbol}`);
+            return null;
+        }
 
-        // 2. 取得持倉量 (Open Interest)
-        const oiUrl = encodeURIComponent(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`);
-        const oiRes = await fetch(`${proxyBase}${oiUrl}`);
-        const oiJson = await oiRes.json();
-        const oiData = JSON.parse(oiJson.contents);
+        const { funding, oi, ls } = await response.json();
 
-        // 3. 取得多空比 (Top Trader Long/Short Ratio - 5m)
-        const lsUrl = encodeURIComponent(`https://fapi.binance.com/fapi/data/topLongShortAccountRatio?symbol=${symbol}&period=5m&limit=1`);
-        const lsRes = await fetch(`${proxyBase}${lsUrl}`);
-        const lsJson = await lsRes.json();
-        const lsRaw = JSON.parse(lsJson.contents);
-        // 防呆：如果剛好沒抓到多空數據，預設為 1
-        const lsRatio = lsRaw && lsRaw.length > 0 ? parseFloat(lsRaw[0].longShortRatio) : 1;
+        // 防呆：確認數據結構正確
+        const lsRatio = ls && ls.length > 0 ? parseFloat(ls[0].longShortRatio) : 1;
+        const markPrice = parseFloat(funding.markPrice);
+        const openInterest = parseFloat(oi.openInterest);
 
         return {
-          symbol: symbol.replace('USDT', ''), // 介面顯示去掉 USDT
-          price: parseFloat(fundingData.markPrice),
-          // Binance 的 openInterest 是"幣的顆數"，需乘上價格轉為 USD
-          openInterestUsd: parseFloat(oiData.openInterest) * parseFloat(fundingData.markPrice),
-          fundingRate: parseFloat(fundingData.lastFundingRate),
+          symbol: symbol.replace('USDT', ''),
+          price: markPrice,
+          openInterestUsd: openInterest * markPrice,
+          fundingRate: parseFloat(funding.lastFundingRate),
           longShortRatio: lsRatio,
         } as FuturesOIData;
       });
 
       const results = await Promise.all(requests);
       
-      // 依照 OI 金額從大到小排序
-      results.sort((a, b) => b.openInterestUsd - a.openInterestUsd);
+      // 過濾掉失敗的請求並排序
+      const validResults = results.filter((item): item is FuturesOIData => item !== null);
+      validResults.sort((a, b) => b.openInterestUsd - a.openInterestUsd);
       
-      setData(results);
+      setData(validResults);
       setLastUpdated(new Date().toLocaleTimeString());
     } catch (error) {
       console.error("Failed to fetch data:", error);
@@ -72,8 +63,8 @@ export const FuturesDashboard: React.FC = () => {
 
   useEffect(() => {
     fetchData();
-    // 每 60 秒自動更新一次
-    const interval = setInterval(fetchData, 60000);
+    // 每 30 秒自動更新一次 (因為是自己的後端，可以稍微頻繁一點)
+    const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -116,9 +107,9 @@ export const FuturesDashboard: React.FC = () => {
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-2">
         <div>
           <h2 className="text-2xl font-bold text-white mb-1">Futures Live Analytics</h2>
-          <div className="flex items-center gap-2 text-sm text-blue-300/80">
-            <AlertCircle size={14} />
-            <span>Data Source: Binance Futures (Real-time)</span>
+          <div className="flex items-center gap-2 text-sm text-emerald-400/80">
+            <Server size={14} />
+            <span>Vercel Serverless API • Binance Real-time</span>
           </div>
         </div>
         <button 
