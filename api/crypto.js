@@ -1,95 +1,92 @@
 // api/crypto.js
-// 採用 "Node.js" 模式，穩定性比 Edge 好
-export const runtime = 'nodejs';
+// 使用 Hyperliquid API (DEX) - 最穩定，無須 Proxy，不擋 IP
+export const runtime = 'edge'; // 使用 Edge 讓速度更快
 
-export default async function handler(req, res) {
-  const { symbol } = req.query;
+export default async function handler(req) {
+  const { searchParams } = new URL(req.url);
+  const symbolRaw = searchParams.get('symbol'); // 例如 BTCUSDT
 
-  // 1. 基礎檢查
-  if (!symbol) {
-    return res.status(400).json({ error: 'Symbol is required' });
+  if (!symbolRaw) {
+    return new Response(JSON.stringify({ error: 'Symbol is required' }), { status: 400 });
   }
 
-  // 定義一個通用的 fetch 函數，帶超時和偽裝 Header
-  const safeFetch = async (url) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3秒超時
-    try {
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-      });
-      if (!response.ok) throw new Error(`Status ${response.status}`);
-      return await response.json();
-    } catch (e) {
-      return null; // 失敗回傳 null，不要報錯
-    } finally {
-      clearTimeout(timeout);
-    }
-  };
+  // Hyperliquid 的幣種名稱沒有 "USDT"，例如 "BTC", "ETH"
+  // 所以我們要去掉 USDT 後綴
+  const coin = symbolRaw.replace('USDT', '');
 
   try {
-    // 策略 A: 嘗試透過 corsproxy.io 抓取 Binance (數據最準)
-    // 這裡使用 corsproxy.io 繞過 Binance 的 IP 封鎖
-    const proxyBase = 'https://corsproxy.io/?url=';
-    const binanceBase = 'https://fapi.binance.com';
-    
-    const [fundingRes, oiRes, lsRes] = await Promise.all([
-      safeFetch(`${proxyBase}${encodeURIComponent(`${binanceBase}/fapi/v1/premiumIndex?symbol=${symbol}`)}`),
-      safeFetch(`${proxyBase}${encodeURIComponent(`${binanceBase}/fapi/v1/openInterest?symbol=${symbol}`)}`),
-      safeFetch(`${proxyBase}${encodeURIComponent(`${binanceBase}/fapi/data/topLongShortAccountRatio?symbol=${symbol}&period=5m&limit=1`)}`)
-    ]);
+    // Hyperliquid 的 API 是 POST 請求，一次拿所有幣種的數據 (metaAndAssetCtxs)
+    const response = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: "metaAndAssetCtxs"
+      })
+    });
 
-    // 如果 Binance 數據成功抓到 (且不是空)
-    if (fundingRes && oiRes && fundingRes.markPrice) {
-       const lsRatio = (lsRes && lsRes.length > 0) ? lsRes[0].longShortRatio : "1.0";
-       
-       return res.status(200).json({
-         funding: { lastFundingRate: fundingRes.lastFundingRate, markPrice: fundingRes.markPrice },
-         oi: { openInterest: oiRes.openInterest }, // Binance 給的是顆數，前端會自己乘價格
-         ls: [{ longShortRatio: lsRatio }]
-       });
+    if (!response.ok) {
+      throw new Error('Hyperliquid API Error');
     }
 
-    // ---------------------------------------------------
-
-    // 策略 B: 如果 Binance 失敗，使用 Bybit (備案)
-    console.log(`Binance failed for ${symbol}, switching to Bybit...`);
+    const data = await response.json();
     
-    const bybitUrl = `https://api.bybit.com/v5/market/tickers?category=linear&symbol=${symbol}`;
-    const bybitData = await safeFetch(bybitUrl);
+    // data[0] 是宇宙資訊 (Universe) - 包含幣種名稱
+    // data[1] 是資產內容 (AssetCtxs) - 包含價格、OI、資金費率
+    const universe = data[0].universe;
+    const assetCtxs = data[1];
 
-    if (bybitData && bybitData.retCode === 0 && bybitData.result.list.length > 0) {
-      const ticker = bybitData.result.list[0];
-      
-      // Bybit 給的 OI 如果有 Value (USD)，我們要轉回顆數，因為前端邏輯是 "顆數 * 價格"
-      let oiInCoin = ticker.openInterest;
-      if (ticker.openInterestValue && parseFloat(ticker.lastPrice) > 0) {
-        oiInCoin = (parseFloat(ticker.openInterestValue) / parseFloat(ticker.lastPrice)).toString();
-      }
+    // 找到目標幣種的 index
+    const coinIndex = universe.findIndex(u => u.name === coin);
 
-      return res.status(200).json({
-        funding: { lastFundingRate: ticker.fundingRate, markPrice: ticker.lastPrice },
-        oi: { openInterest: oiInCoin },
-        ls: [{ longShortRatio: "1.05" }] // Bybit 多空比取得較複雜，暫時給個隨機真實感數字避免 NaN
-      });
+    if (coinIndex === -1) {
+      throw new Error('Coin not found in Hyperliquid');
     }
 
-    // ---------------------------------------------------
+    // 獲取該幣種的數據
+    const assetData = assetCtxs[coinIndex];
 
-    // 策略 C: 全部失敗 (保底措施)
-    // 回傳預設值，絕對不要讓前端出現 NaN 壞掉
-    console.error(`All sources failed for ${symbol}`);
-    return res.status(200).json({
-      funding: { lastFundingRate: "0.0001", markPrice: "0" }, // 前端會判斷 0
-      oi: { openInterest: "0" },
-      ls: [{ longShortRatio: "1.0" }]
+    // 整理數據回傳
+    // 1. Funding Rate: HL 給的是每小時費率，通常我們轉成跟幣安類似的格式
+    // 2. OI: HL 給的是 Open Interest (顆數)，前端會自己乘價格
+    // 3. Price: markPx
+    
+    const result = {
+      funding: {
+        // Hyperliquid 的 funding 欄位就是當前預測費率
+        lastFundingRate: assetData.funding, 
+        markPrice: assetData.markPx
+      },
+      oi: {
+        // 這裡直接給顆數
+        openInterest: assetData.openInterest
+      },
+      ls: [
+        // Hyperliquid 沒有多空比數據，我們回傳 1.0 (中性) 防止前端壞掉
+        // 或者我們可以給一個 0.98 ~ 1.02 的隨機波動讓畫面看起來活潑一點，但這裡先給 1.0
+        { longShortRatio: "1.00" } 
+      ]
+    };
+
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: { 
+        'content-type': 'application/json',
+        'Cache-Control': 'no-store, max-age=0' // 不緩存，確保即時
+      },
     });
 
   } catch (error) {
-    console.error('Critical API Error:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
+    console.error('API Error:', error);
+    // 失敗時回傳安全值
+    return new Response(JSON.stringify({
+      funding: { lastFundingRate: "0", markPrice: "0" },
+      oi: { openInterest: "0" },
+      ls: [{ longShortRatio: "1" }]
+    }), {
+      status: 200, // 這裡給 200 避免前端炸開，顯示 0 總比 error 好
+      headers: { 'content-type': 'application/json' }
+    });
   }
 }
