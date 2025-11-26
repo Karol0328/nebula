@@ -1,146 +1,209 @@
-// api/etf.js
-// 自動化爬蟲版：使用 Jina Reader 繞過防火牆抓取 Farside 真實數據
-export const runtime = 'nodejs';
+import React, { useState, useEffect, useRef } from 'react';
+import { Skull, TrendingDown, TrendingUp, AlertTriangle, Zap, Activity, Droplets } from 'lucide-react';
 
-export default async function handler(req, res) {
-  try {
-    // 1. 獲取 Binance 真實 K 線 (價格數據)
-    const [btcPriceRes, ethPriceRes] = await Promise.all([
-      fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=45'),
-      fetch('https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=1d&limit=45')
-    ]);
+// 定義爆倉單的結構
+interface LiquidationOrder {
+  id: string;
+  symbol: string;
+  side: 'BUY' | 'SELL'; // BUY = 空頭回補(空軍爆倉), SELL = 多頭賣出(多軍爆倉)
+  amount: number;       // 數量
+  price: number;        // 爆倉價格
+  value: number;        // 總價值 (USD)
+  time: number;
+}
 
-    const btcPrices = await btcPriceRes.json();
-    const ethPrices = await ethPriceRes.json();
+export const EtfTracker: React.FC = () => {
+  const [orders, setOrders] = useState<LiquidationOrder[]>([]);
+  const [stats, setStats] = useState({ totalValue: 0, longRekts: 0, shortRekts: 0 });
+  const [isConnected, setIsConnected] = useState(false);
+  
+  // 使用 Ref 來避免 useEffect 閉包問題
+  const wsRef = useRef<WebSocket | null>(null);
 
-    // 2. 透過 Jina Reader 抓取 Farside 網頁 (它會幫我們繞過 Cloudflare 並轉成文字)
-    // 格式: https://r.jina.ai/<TARGET_URL>
-    const jinaBase = 'https://r.jina.ai/';
-    const [btcRaw, ethRaw] = await Promise.all([
-      fetch(`${jinaBase}https://farside.co.uk/bitcoin-etf-flow-all-data/`),
-      fetch(`${jinaBase}https://farside.co.uk/ethereum-etf-flow-all-data/`)
-    ]);
+  useEffect(() => {
+    // 連接 Binance 合約 WebSocket (全市場強制平倉推播)
+    const ws = new WebSocket('wss://fstream.binance.com/ws/!forceOrder@arr');
 
-    const btcText = await btcRaw.text();
-    const ethText = await ethRaw.text();
-
-    // --- 解析器：從 Markdown 表格中提取數據 ---
-    const parseJinaData = (text) => {
-      const flows = {};
-      
-      // Jina 回傳的通常是 Markdown 表格，例如: | 21 Nov 2024 | ... | 523.9 |
-      // 我們將文本按行分割
-      const lines = text.split('\n');
-      
-      lines.forEach(line => {
-        // 尋找日期格式 (DD Mon YYYY)
-        // Farside 的日期有時候是 "11 Nov 2024" 或 "Nov 11 2024"
-        const dateMatch = line.match(/(\d{1,2})\s([A-Za-z]{3})\s(\d{4})/);
-        
-        if (dateMatch) {
-          const day = dateMatch[1].padStart(2, '0');
-          const monthStr = dateMatch[2];
-          const year = dateMatch[3];
-          
-          const months = { Jan:'01', Feb:'02', Mar:'03', Apr:'04', May:'05', Jun:'06', Jul:'07', Aug:'08', Sep:'09', Oct:'10', Nov:'11', Dec:'12' };
-          const month = months[monthStr];
-          
-          if (month) {
-            const dateKey = `${year}-${month}-${day}`; // 格式 YYYY-MM-DD
-            
-            // 提取該行所有數字 (包含負號和小數點)
-            // 排除掉年份(202x)和日期(1-31)，我們找看起來像 Flow 的數字
-            // Farside 的 Total 欄位通常在最後
-            // 我們把 "|" 符號切開，取最後一個非空欄位
-            const columns = line.split('|').map(col => col.trim()).filter(col => col !== '');
-            
-            if (columns.length > 2) {
-              // 取最後一欄 (Total)
-              let lastCol = columns[columns.length - 1];
-              
-              // 處理括號格式 (123.5) 代表負數 -123.5
-              if (lastCol.includes('(') && lastCol.includes(')')) {
-                lastCol = '-' + lastCol.replace(/[()]/g, '');
-              }
-              
-              // 移除逗號和其他非數字字符 (保留負號和小數點)
-              const cleanNum = lastCol.replace(/[^\d.-]/g, '');
-              const flowVal = parseFloat(cleanNum);
-
-              if (!isNaN(flowVal)) {
-                flows[dateKey] = flowVal;
-              }
-            }
-          }
-        }
-      });
-      return flows;
+    ws.onopen = () => {
+      setIsConnected(true);
+      console.log('Connected to Liquidation Stream');
     };
 
-    const realBtcFlows = parseJinaData(btcText);
-    const realEthFlows = parseJinaData(ethText);
-
-    // console.log('Parsed BTC Flows:', Object.keys(realBtcFlows).slice(0, 5)); // Debug 用
-
-    // 3. 整合數據
-    const results = btcPrices.map((candle, index) => {
-      const timestamp = candle[0];
-      const dateObj = new Date(timestamp);
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      // msg.o 是 Order 詳情
+      // o.s = Symbol, o.S = Side, o.q = Original Quantity, o.p = Price, o.ap = Average Price
       
-      const yyyy = dateObj.getFullYear();
-      const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
-      const dd = String(dateObj.getDate()).padStart(2, '0');
-      const dateKey = `${yyyy}-${mm}-${dd}`;
-      
-      const displayDate = dateObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-      const btcClose = parseFloat(candle[4]);
-      const ethClose = ethData[index] ? parseFloat(ethData[index][4]) : 0;
+      const newOrders: LiquidationOrder[] = msg.o ? [{
+        id: Math.random().toString(36).substr(2, 9),
+        symbol: msg.o.s.replace('USDT', ''), // 去掉 USDT 顯示比較乾淨
+        side: msg.o.S, 
+        amount: parseFloat(msg.o.q),
+        price: parseFloat(msg.o.p),
+        value: parseFloat(msg.o.q) * parseFloat(msg.o.p), // 計算總價值
+        time: msg.E
+      }] : [];
 
-      // 預設邏輯：
-      // 1. 先找爬蟲抓到的真實數據 (realBtcFlows)
-      // 2. 如果爬不到 (可能是今天數據還沒出，或是 Farside 格式變了)，回退到根據價格波動估算
-      
-      let btcFlow, ethFlow;
+      if (newOrders.length > 0) {
+        const order = newOrders[0];
+        
+        // 更新統計數據
+        setStats(prev => ({
+          totalValue: prev.totalValue + order.value,
+          longRekts: prev.longRekts + (order.side === 'SELL' ? 1 : 0), // 多單被強平是賣出
+          shortRekts: prev.shortRekts + (order.side === 'BUY' ? 1 : 0), // 空單被強平是買入
+        }));
 
-      if (realBtcFlows[dateKey] !== undefined) {
-        // 命中真實數據！
-        btcFlow = realBtcFlows[dateKey];
-        ethFlow = realEthFlows[dateKey] !== undefined ? realEthFlows[dateKey] : 0;
-      } else {
-        // 沒有真實數據的備案 (Fallback)
-        // 避免圖表空窗
-        const dayOfWeek = dateObj.getDay();
-        if (dayOfWeek === 0 || dayOfWeek === 6) {
-          btcFlow = 0;
-          ethFlow = 0;
-        } else {
-          // 根據漲跌幅模擬 (Fallback 模式)
-          const open = parseFloat(candle[1]);
-          const change = (btcClose - open) / open;
-          btcFlow = change * 20000; 
-          if (Math.abs(change) < 0.005) btcFlow *= 0.5;
-          ethFlow = btcFlow * 0.3;
-        }
+        // 更新列表 (只保留最近 50 筆)
+        setOrders(prev => {
+          const updated = [...newOrders, ...prev];
+          return updated.slice(0, 50);
+        });
       }
+    };
 
-      return {
-        date: displayDate,
-        btcInflow: parseFloat(btcFlow.toFixed(1)),
-        ethInflow: parseFloat(ethFlow.toFixed(1)),
-        btcPrice: btcClose,
-        ethPrice: ethClose
-      };
-    });
+    ws.onclose = () => setIsConnected(false);
 
-    // 加上 Cache-Control，讓 Vercel 快取 1 小時，避免太頻繁打 Jina 被擋
-    res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
-    
-    // 回傳最近 30 筆
-    res.status(200).json(results.slice(-30));
+    return () => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    };
+  }, []);
 
-  } catch (error) {
-    console.error('API Error:', error);
-    // 嚴重錯誤時回傳空陣列，前端會處理
-    res.status(500).json({ error: 'Failed to fetch data' });
-  }
-}
+  // 格式化數字
+  const formatMoney = (val: number) => {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(val);
+  };
+
+  const formatTime = (ts: number) => {
+    return new Date(ts).toLocaleTimeString('en-GB', { hour12: false });
+  };
+
+  return (
+    <div className="p-4 md:p-6 space-y-6 max-w-7xl mx-auto min-h-screen">
+      {/* Header Stats */}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-2">
+        <div>
+          <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+            <Skull className="text-rose-500" />
+            Live Liquidation Feed
+          </h2>
+          <div className="flex items-center gap-2 text-sm text-slate-400 mt-1">
+            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}></div>
+            <span>Binance Futures WebSocket • Real-time</span>
+          </div>
+        </div>
+
+        {/* Session Stats Cards */}
+        <div className="grid grid-cols-3 gap-2 md:gap-4 w-full md:w-auto">
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg text-center">
+            <p className="text-[10px] text-slate-500 uppercase">Session Volume</p>
+            <p className="text-lg font-bold text-white">{formatMoney(stats.totalValue)}</p>
+          </div>
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg text-center">
+            <p className="text-[10px] text-slate-500 uppercase">Longs Rekt</p>
+            <p className="text-lg font-bold text-rose-500">{stats.longRekts}</p>
+          </div>
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg text-center">
+            <p className="text-[10px] text-slate-500 uppercase">Shorts Rekt</p>
+            <p className="text-lg font-bold text-emerald-500">{stats.shortRekts}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Feed Area */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        {/* Left: Latest Liquidations List */}
+        <div className="lg:col-span-2 bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden shadow-xl backdrop-blur-sm">
+          <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/80">
+            <h3 className="font-bold text-white flex items-center gap-2">
+              <Activity size={18} className="text-blue-400" />
+              Latest Casualties
+            </h3>
+            <span className="text-xs text-slate-500">Auto-updating...</span>
+          </div>
+          
+          <div className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto">
+            {orders.length === 0 ? (
+              <div className="p-8 text-center text-slate-500 flex flex-col items-center">
+                <div className="animate-spin mb-2"><Zap size={24} /></div>
+                Waiting for liquidations...
+              </div>
+            ) : (
+              orders.map((item) => {
+                const isBigRekt = item.value > 50000; // 超過 5萬美金算大爆倉
+                // SELL = Longs Liquidated (Price went down) -> Red
+                // BUY = Shorts Liquidated (Price went up) -> Green
+                const isLongRekt = item.side === 'SELL'; 
+
+                return (
+                  <div key={item.id} className={`p-4 flex justify-between items-center transition-colors hover:bg-slate-800/40 ${isBigRekt ? 'bg-slate-800/20' : ''} animate-in slide-in-from-top-2 duration-300`}>
+                    <div className="flex items-center gap-4">
+                      <div className={`p-2 rounded-lg ${isLongRekt ? 'bg-rose-500/10 text-rose-500' : 'bg-emerald-500/10 text-emerald-500'}`}>
+                        {isLongRekt ? <TrendingDown size={20} /> : <TrendingUp size={20} />}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-white text-lg">{item.symbol}</span>
+                          <span className={`text-xs px-1.5 py-0.5 rounded border ${isLongRekt ? 'border-rose-500/30 text-rose-400' : 'border-emerald-500/30 text-emerald-400'}`}>
+                            {isLongRekt ? 'Long Liquidated' : 'Short Liquidated'}
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-500 mt-0.5">
+                          @ ${item.price.toLocaleString()} • {formatTime(item.time)}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="text-right">
+                      <div className={`font-mono font-bold text-lg ${isBigRekt ? 'text-yellow-400' : 'text-slate-200'}`}>
+                         {formatMoney(item.value)}
+                         {isBigRekt && <span className="ml-1">🔥</span>}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {item.amount.toFixed(3)} {item.symbol}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {/* Right: Info / Explanation */}
+        <div className="space-y-6">
+           <div className="bg-gradient-to-br from-blue-600/20 to-purple-600/20 border border-blue-500/20 rounded-xl p-6">
+              <h3 className="text-blue-300 font-bold mb-2 flex items-center gap-2">
+                 <Zap size={18} /> Market Insight
+              </h3>
+              <p className="text-sm text-slate-300 leading-relaxed">
+                 Watching liquidations is key to understanding market volatility. 
+                 <br/><br/>
+                 <span className="text-rose-400 font-bold">Red (Longs Rekt):</span> Price crashed, forcing buyers to sell. Too many of these can trigger a <strong>Long Squeeze</strong> (price dropping further).
+                 <br/><br/>
+                 <span className="text-emerald-400 font-bold">Green (Shorts Rekt):</span> Price pumped, forcing sellers to buy back. This fuels a <strong>Short Squeeze</strong> (price rocketing up).
+              </p>
+           </div>
+
+           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+              <h3 className="text-slate-200 font-bold mb-4 flex items-center gap-2">
+                 <AlertTriangle size={18} className="text-yellow-500" />
+                 High Risk Zone
+              </h3>
+              <div className="text-xs text-slate-400 space-y-2">
+                 <p>Large liquidations ({'>'}$50k) often mark local tops or bottoms.</p>
+                 <div className="h-1 w-full bg-slate-800 rounded overflow-hidden">
+                    <div className="h-full bg-yellow-500/50 w-2/3"></div>
+                 </div>
+                 <p>Current Stream Status: <span className="text-emerald-400">Active</span></p>
+              </div>
+           </div>
+        </div>
+
+      </div>
+    </div>
+  );
+};
