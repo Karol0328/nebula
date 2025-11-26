@@ -1,27 +1,93 @@
 import React, { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
-import { getMockFuturesData } from '../services/marketData';
-import { FuturesOIData } from '../types';
-import { AlertCircle, TrendingUp, DollarSign, Scale } from 'lucide-react';
+import { AlertCircle, TrendingUp, DollarSign, Scale, RefreshCw } from 'lucide-react';
+
+// 定義數據結構
+interface FuturesOIData {
+  symbol: string;
+  openInterestUsd: number;
+  longShortRatio: number;
+  fundingRate: number;
+  price: number;
+}
 
 export const FuturesDashboard: React.FC = () => {
   const [data, setData] = useState<FuturesOIData[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 我們要監控的幣種列表
+  const targetSymbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT'];
+
+  const fetchMarketData = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      // 使用 allorigins 作為臨時 proxy 繞過 CORS
+      // 注意：正式上線建議使用 Next.js API Route 或自己的 Backend 做 Proxy
+      const proxyUrl = 'https://api.allorigins.win/get?url=';
+      
+      const promises = targetSymbols.map(async (symbol) => {
+        // 1. 獲取 OI 和 價格
+        // Binance API: https://fapi.binance.com/fapi/v1/openInterest
+        const oiUrl = encodeURIComponent(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`);
+        const oiRes = await fetch(`${proxyUrl}${oiUrl}`);
+        const oiJson = await oiRes.json();
+        const oiData = JSON.parse(oiJson.contents);
+
+        // 2. 獲取 多空比 (Top Trader Long/Short Ratio)
+        // Binance API: https://fapi.binance.com/fapi/data/topLongShortAccountRatio
+        const lsUrl = encodeURIComponent(`https://fapi.binance.com/fapi/data/topLongShortAccountRatio?symbol=${symbol}&period=5m&limit=1`);
+        const lsRes = await fetch(`${proxyUrl}${lsUrl}`);
+        const lsJson = await lsRes.json();
+        const lsDataRaw = JSON.parse(lsJson.contents);
+        const lsData = lsDataRaw && lsDataRaw.length > 0 ? lsDataRaw[0] : { longShortRatio: '1' };
+
+        // 3. 獲取 資金費率
+        // Binance API: https://fapi.binance.com/fapi/v1/premiumIndex
+        const fundUrl = encodeURIComponent(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`);
+        const fundRes = await fetch(`${proxyUrl}${fundUrl}`);
+        const fundJson = await fundRes.json();
+        const fundData = JSON.parse(fundJson.contents);
+
+        return {
+          symbol: symbol.replace('USDT', ''), // 顯示名稱去掉 USDT
+          openInterestUsd: parseFloat(oiData.openInterest) * parseFloat(fundData.markPrice), // OI 數量 * 價格 = 美金價值
+          longShortRatio: parseFloat(lsData.longShortRatio),
+          fundingRate: parseFloat(fundData.lastFundingRate),
+          price: parseFloat(fundData.markPrice)
+        };
+      });
+
+      const results = await Promise.all(promises);
+      
+      // 依照 OI 大小排序
+      results.sort((a, b) => b.openInterestUsd - a.openInterestUsd);
+      
+      setData(results);
+    } catch (err) {
+      console.error("Failed to fetch data", err);
+      setError("無法抓取 Binance 數據，請檢查網絡或 CORS 設定。");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    // Simulate API fetch delay
-    setTimeout(() => {
-      setData(getMockFuturesData());
-    }, 500);
+    fetchMarketData();
+    // 設置每 30 秒自動刷新一次
+    const interval = setInterval(fetchMarketData, 30000);
+    return () => clearInterval(interval);
   }, []);
 
-  const CustomTooltip = ({ active, payload, label }: any) => {
+  const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
       const d = payload[0].payload as FuturesOIData;
       return (
-        <div className="bg-slate-900 border border-slate-700 p-3 rounded-lg shadow-xl">
-          <p className="font-bold text-white mb-2">{d.symbol}</p>
+        <div className="bg-slate-900 border border-slate-700 p-3 rounded-lg shadow-xl z-50">
+          <p className="font-bold text-white mb-2">{d.symbol} <span className="text-slate-500 text-xs font-normal">Current: ${d.price.toFixed(2)}</span></p>
           <div className="space-y-1 text-sm">
-            <p className="text-slate-400 flex justify-between gap-4"><span>OI (USD):</span> <span className="text-yellow-400">${(d.openInterestUsd / 1000000).toFixed(1)}M</span></p>
+            <p className="text-slate-400 flex justify-between gap-4"><span>OI (USD):</span> <span className="text-yellow-400">${(d.openInterestUsd / 1000000).toFixed(2)}M</span></p>
             <p className="text-slate-400 flex justify-between gap-4"><span>L/S Ratio:</span> <span className={d.longShortRatio > 1 ? 'text-emerald-400' : 'text-rose-400'}>{d.longShortRatio.toFixed(2)}</span></p>
             <p className="text-slate-400 flex justify-between gap-4"><span>Funding:</span> <span className={d.fundingRate > 0 ? 'text-emerald-400' : 'text-rose-400'}>{(d.fundingRate * 100).toFixed(4)}%</span></p>
           </div>
@@ -33,18 +99,31 @@ export const FuturesDashboard: React.FC = () => {
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
-      <div className="mb-6">
-        <h2 className="text-2xl font-bold text-white mb-2">Futures Analytics</h2>
-        <div className="bg-blue-900/20 border border-blue-500/20 rounded-lg p-4 flex items-start gap-3">
-          <AlertCircle className="text-blue-400 shrink-0 mt-0.5" size={18} />
-          <p className="text-sm text-blue-200">
-            Showcasing Open Interest (OI) and Long/Short ratios for top assets. 
-            High OI paired with Funding Rates often indicates volatility. 
-            <span className="opacity-50 block mt-1 text-xs">*Data simulated for demo purposes due to API CORS restrictions.</span>
-          </p>
+      <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-white mb-2">Futures Analytics (Binance Data)</h2>
+          <div className="flex items-center gap-2 text-sm text-blue-200">
+            <AlertCircle size={16} />
+            <span>Real-time data from Binance API via Proxy</span>
+          </div>
         </div>
+        <button 
+          onClick={fetchMarketData} 
+          disabled={loading}
+          className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors disabled:opacity-50"
+        >
+          <RefreshCw size={18} className={loading ? "animate-spin" : ""} />
+          {loading ? "Refreshing..." : "Refresh Data"}
+        </button>
       </div>
 
+      {error && (
+        <div className="bg-red-900/20 border border-red-500/50 text-red-200 p-4 rounded-lg mb-6">
+          {error}
+        </div>
+      )}
+
+      {/* 以下 Chart 區域代碼保持不變，直接使用 data 變數 */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Open Interest Chart */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg">
@@ -78,7 +157,7 @@ export const FuturesDashboard: React.FC = () => {
               <Scale className="text-blue-500" size={18} />
               Long/Short Ratio
             </h3>
-            <span className="text-xs text-slate-500 px-2 py-1 bg-slate-800 rounded border border-slate-700">Global Accounts</span>
+            <span className="text-xs text-slate-500 px-2 py-1 bg-slate-800 rounded border border-slate-700">Top Accounts</span>
           </div>
           <div className="h-[300px]">
             <ResponsiveContainer width="100%" height="100%">
@@ -102,8 +181,8 @@ export const FuturesDashboard: React.FC = () => {
       </div>
       
       {/* Detailed Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {data.slice(0, 4).map((item) => (
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {data.map((item) => (
           <div key={item.symbol} className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-4">
             <div className="flex justify-between items-center mb-2">
               <span className="font-bold text-white">{item.symbol}</span>
@@ -119,6 +198,10 @@ export const FuturesDashboard: React.FC = () => {
               <div className="flex justify-between text-sm">
                 <span className="text-slate-400">L/S Ratio</span>
                 <span className="text-slate-200">{item.longShortRatio.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-400">Price</span>
+                <span className="text-slate-200">${item.price.toLocaleString()}</span>
               </div>
             </div>
           </div>
