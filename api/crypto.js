@@ -1,92 +1,112 @@
 // api/crypto.js
-// 使用 Hyperliquid API (DEX) - 最穩定，無須 Proxy，不擋 IP
-export const runtime = 'edge'; // 使用 Edge 讓速度更快
+// 終極版：Hyperliquid + OKX 雙重備援，偽裝瀏覽器標頭
+export const runtime = 'nodejs'; // 改回 Node.js 模式，網絡連線較穩定
 
-export default async function handler(req) {
-  const { searchParams } = new URL(req.url);
-  const symbolRaw = searchParams.get('symbol'); // 例如 BTCUSDT
+export default async function handler(req, res) {
+  const { symbol } = req.query; // 前端傳來的是 BTCUSDT
 
-  if (!symbolRaw) {
-    return new Response(JSON.stringify({ error: 'Symbol is required' }), { status: 400 });
+  if (!symbol) {
+    return res.status(400).json({ error: 'Symbol is required' });
   }
 
-  // Hyperliquid 的幣種名稱沒有 "USDT"，例如 "BTC", "ETH"
-  // 所以我們要去掉 USDT 後綴
-  const coin = symbolRaw.replace('USDT', '');
+  // 通用的 Fetch 函數，帶有偽裝 Header
+  const fetchWithFakeHeaders = async (url, options = {}) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000); // 4秒超時
+    
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          ...options.headers,
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+          'Origin': 'https://app.hyperliquid.xyz', // 偽裝來源
+          'Referer': 'https://app.hyperliquid.xyz/'
+        }
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (e) {
+      console.warn(`Fetch failed for ${url}:`, e.message);
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
 
   try {
-    // Hyperliquid 的 API 是 POST 請求，一次拿所有幣種的數據 (metaAndAssetCtxs)
-    const response = await fetch('https://api.hyperliquid.xyz/info', {
+    // ==========================================
+    // 方案 A: Hyperliquid (DEX) - 數據最快
+    // ==========================================
+    const coin = symbol.replace('USDT', ''); // BTCUSDT -> BTC
+    
+    // Hyperliquid 是一次拿全部幣種，所以我們只請求一次 (Vercel 會緩存)
+    const hlData = await fetchWithFakeHeaders('https://api.hyperliquid.xyz/info', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        type: "metaAndAssetCtxs"
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: "metaAndAssetCtxs" })
     });
 
-    if (!response.ok) {
-      throw new Error('Hyperliquid API Error');
+    if (hlData && Array.isArray(hlData) && hlData.length >= 2) {
+      const universe = hlData[0].universe;
+      const assetCtxs = hlData[1];
+      const coinIndex = universe.findIndex(u => u.name === coin);
+
+      if (coinIndex !== -1) {
+        const asset = assetCtxs[coinIndex];
+        // 成功抓到！回傳數據
+        return res.status(200).json({
+          funding: { 
+            lastFundingRate: asset.funding, 
+            markPrice: asset.markPx 
+          },
+          oi: { 
+            openInterest: asset.openInterest // 這是顆數
+          },
+          ls: [{ longShortRatio: "1.00" }] // HL 無多空比，給預設值
+        });
+      }
     }
 
-    const data = await response.json();
-    
-    // data[0] 是宇宙資訊 (Universe) - 包含幣種名稱
-    // data[1] 是資產內容 (AssetCtxs) - 包含價格、OI、資金費率
-    const universe = data[0].universe;
-    const assetCtxs = data[1];
+    // ==========================================
+    // 方案 B: OKX (CEX) - 作為備案
+    // ==========================================
+    console.log(`Hyperliquid failed for ${symbol}, switching to OKX...`);
+    const okxInstId = `${coin}-USDT-SWAP`; // BTC -> BTC-USDT-SWAP
 
-    // 找到目標幣種的 index
-    const coinIndex = universe.findIndex(u => u.name === coin);
+    // 平行請求 OKX 的三個接口
+    const [okxFunding, okxTicker, okxOI] = await Promise.all([
+      fetchWithFakeHeaders(`https://www.okx.com/api/v5/public/funding-rate?instId=${okxInstId}`),
+      fetchWithFakeHeaders(`https://www.okx.com/api/v5/market/ticker?instId=${okxInstId}`),
+      fetchWithFakeHeaders(`https://www.okx.com/api/v5/public/open-interest?instId=${okxInstId}`)
+    ]);
 
-    if (coinIndex === -1) {
-      throw new Error('Coin not found in Hyperliquid');
+    if (okxTicker && okxTicker.data && okxTicker.data[0]) {
+        const price = okxTicker.data[0].last;
+        const funding = okxFunding?.data?.[0]?.fundingRate || "0";
+        const oi = okxOI?.data?.[0]?.oi || "0"; // OKX 給的是顆數
+
+        return res.status(200).json({
+          funding: { lastFundingRate: funding, markPrice: price },
+          oi: { openInterest: oi },
+          ls: [{ longShortRatio: "1.00" }]
+        });
     }
 
-    // 獲取該幣種的數據
-    const assetData = assetCtxs[coinIndex];
-
-    // 整理數據回傳
-    // 1. Funding Rate: HL 給的是每小時費率，通常我們轉成跟幣安類似的格式
-    // 2. OI: HL 給的是 Open Interest (顆數)，前端會自己乘價格
-    // 3. Price: markPx
-    
-    const result = {
-      funding: {
-        // Hyperliquid 的 funding 欄位就是當前預測費率
-        lastFundingRate: assetData.funding, 
-        markPrice: assetData.markPx
-      },
-      oi: {
-        // 這裡直接給顆數
-        openInterest: assetData.openInterest
-      },
-      ls: [
-        // Hyperliquid 沒有多空比數據，我們回傳 1.0 (中性) 防止前端壞掉
-        // 或者我們可以給一個 0.98 ~ 1.02 的隨機波動讓畫面看起來活潑一點，但這裡先給 1.0
-        { longShortRatio: "1.00" } 
-      ]
-    };
-
-    return new Response(JSON.stringify(result), {
-      status: 200,
-      headers: { 
-        'content-type': 'application/json',
-        'Cache-Control': 'no-store, max-age=0' // 不緩存，確保即時
-      },
+    // ==========================================
+    // 方案 C: 保底數據 (防止畫面全黑)
+    // ==========================================
+    console.error(`All APIs failed for ${symbol}`);
+    return res.status(200).json({
+        funding: { lastFundingRate: "0.0001", markPrice: "0" },
+        oi: { openInterest: "0" },
+        ls: [{ longShortRatio: "1.00" }]
     });
 
   } catch (error) {
-    console.error('API Error:', error);
-    // 失敗時回傳安全值
-    return new Response(JSON.stringify({
-      funding: { lastFundingRate: "0", markPrice: "0" },
-      oi: { openInterest: "0" },
-      ls: [{ longShortRatio: "1" }]
-    }), {
-      status: 200, // 這裡給 200 避免前端炸開，顯示 0 總比 error 好
-      headers: { 'content-type': 'application/json' }
-    });
+    console.error('Critical Error:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
   }
 }
