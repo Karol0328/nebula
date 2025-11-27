@@ -35,25 +35,33 @@ export interface TickerData {
   source: 'BINANCE' | 'COINGECKO'; // Identify where data comes from
 }
 
-export interface EtfFlowData {
-  date: string;
-  btcInflow: number; // In Millions USD
-  ethInflow: number; // In Millions USD
-  btcPrice: number;
-  ethPrice: number;
+// [已刪除] EtfFlowData - 不再需要
+
+// 新增：爆倉單定義
+export interface LiquidationOrder {
+  id: string;
+  symbol: string;
+  side: 'BUY' | 'SELL'; // BUY = 空頭回補(空軍爆倉), SELL = 多頭賣出(多軍爆倉)
+  amount: number;       // 數量
+  price: number;        // 爆倉價格
+  value: number;        // 總價值 (USD)
+  time: number;
 }
 
 export interface FuturesOIData {
   symbol: string;
   openInterest: number; // In Token amount
   openInterestUsd: number; // In USD
+  volume24h: number; // 之前新增的成交量欄位
   longShortRatio: number;
   price: number;
   fundingRate: number;
+  priceChange24h: number; // 之前新增的漲跌幅欄位
+  source: string; // 之前新增的數據來源
 }
 
 export enum MarketTab {
   SPOT = 'SPOT',
   FUTURES = 'FUTURES',
-  ETF = 'ETF'
+  LIQUIDATION = 'LIQUIDATION' // 這裡改成了 LIQUIDATION
 }
