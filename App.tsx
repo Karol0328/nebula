@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Navigation } from './components/Navigation';
 import { SpotMarket } from './pages/SpotMarket';
 import { FuturesDashboard } from './pages/FuturesDashboard';
-import { EtfTracker } from './pages/LiquidationFeed';
+import { LiquidationFeed } from './pages/LiquidationFeed';
 import { MarketTab } from './types';
 
 function App() {
