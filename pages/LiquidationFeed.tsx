@@ -12,7 +12,7 @@ interface LiquidationOrder {
   time: number;
 }
 
-export const EtfTracker: React.FC = () => {
+export const LiquidationFeed: React.FC = () => {
   const [orders, setOrders] = useState<LiquidationOrder[]>([]);
   const [stats, setStats] = useState({ totalValue: 0, longRekts: 0, shortRekts: 0 });
   const [isConnected, setIsConnected] = useState(false);
